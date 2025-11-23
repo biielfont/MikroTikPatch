@@ -1,4 +1,4 @@
-from secret import *
+from secrets import *
 import struct,zlib
 import argparse,os
 from datetime import datetime
