@@ -1,4 +1,4 @@
-from secret import *
+from secrets import *
 import subprocess,lzma
 import struct,os
 from npk import NovaPackage,NpkPartID,NpkFileContainer
