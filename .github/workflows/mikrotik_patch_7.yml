@@ -100,7 +100,10 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install pefile lief
+          pip install --upgrade pip
+          pip install pefile lief xxhash
+          sudo python3 -m pip install pefile lief xxhash
+
 
 
       - name: Determine version (requested or latest)
