@@ -159,7 +159,7 @@ jobs:
 
           sudo mkdir new_iso
           sudo cp -r iso/* new_iso/
-          sudo umount iso && rm -rf iso
+          sudo umount iso && sudo rm -rf iso
 
           sudo mv new_iso/routeros-$LATEST_VERSION$ARCH.npk ./
           sudo -E python3 patch.py npk routeros-$LATEST_VERSION$ARCH.npk
@@ -196,11 +196,11 @@ jobs:
               -b efiboot.img -no-emul-boot -R -J new_iso
           fi
 
-          rm -rf efiboot
+          sudo rm -rf efiboot
           mkdir all_packages
           cp new_iso/*.npk all_packages/
 
-          rm -rf new_iso
+          sudo rm -rf new_iso
           cd all_packages
           zip ../all_packages-${{ matrix.arch }}-$LATEST_VERSION.zip *.npk
           cd ..
