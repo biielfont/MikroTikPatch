@@ -41,16 +41,22 @@ jobs:
   Build_Matrix:
     runs-on: ubuntu-latest
     outputs:
-      matrix_arch: ${{ steps.set_matrix.outputs.matrix_arch }}
+      matrix_include: ${{ steps.set_matrix.outputs.matrix_include }}
     steps:
-      - name: Generate architecture matrix
-        id: set_matrix
+      - id: set_matrix
         run: |
           if [ -z "${{ github.event.inputs.arch }}" ]; then
-            echo 'matrix_arch=["x86","arm64","arm","mmips","mipsbe","smips","tile","ppc"]' >> $GITHUB_OUTPUT
+            ARCH_LIST=("x86" "arm64" "arm" "mmips" "mipsbe" "smips" "tile" "ppc")
           else
-            ARCHES=$(echo '${{ github.event.inputs.arch }}' | sed 's/,/","/g')
-            echo "matrix_arch=[\"$ARCHES\"]" >> $GITHUB_OUTPUT
+            IFS=',' read -ra ARCH_LIST <<< "${{ github.event.inputs.arch }}"
+          fi
+
+          MATRIX_JSON="["
+          for A in "${ARCH_LIST[@]}"; do
+            MATRIX_JSON+="{\"arch\":\"$A\",\"channel\":\"${{ github.event.inputs.channel }}\"},"
+          done
+          MATRIX_JSON="${MATRIX_JSON%,}]"
+          echo "matrix_include=$MATRIX_JSON" >> $GITHUB_OUTPUT
 
   # -----------------------------
   # Tiempo de build
@@ -74,8 +80,7 @@ jobs:
     runs-on: ubuntu-22.04
     strategy:
       matrix:
-        arch: ${{ fromJson(needs.Build_Matrix.outputs.matrix_arch) }}
-        channel: [${{ github.event.inputs.channel }}]
+        include: ${{ fromJson(needs.Build_Matrix.outputs.matrix_include) }}
 
     env:
       TZ: 'Asia/Jakarta'
@@ -181,8 +186,8 @@ jobs:
 
       - name: Patch firmware
         run: |
-          # Aquí va toda la lógica de patching de firmware tal como tu workflow original.
-          echo "Firmware patching steps..." 
+          # Lógica de patching y firma de firmware
+          echo "Aquí van todos los pasos de patching tal como tu workflow original..."
 
       # ---------------------------
       # RELEASE
@@ -191,10 +196,8 @@ jobs:
         run: |
           HEADER="Authorization: token ${{ secrets.GITHUB_TOKEN }}"
           TAG="${{ env.LATEST_VERSION }}${{ env.ARCH }}"
-
           RELEASE_INFO=$(curl -s -H "$HEADER" https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG)
           RELEASE_ID=$(echo $RELEASE_INFO | jq -r '.id')
-
           if [ "$RELEASE_ID" != "null" ]; then
             echo "Deleting previous release $TAG"
             curl -X DELETE -H "$HEADER" https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$TAG
