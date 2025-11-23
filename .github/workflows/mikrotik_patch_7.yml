@@ -1,8 +1,28 @@
 name: Patch Mikrotik RouterOS 7.x
+
 on:
   schedule:
     - cron: "0 0 * * *"
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Versión específica de RouterOS (ej: 7.15.1). Si se deja vacío, usa la última"
+        required: false
+        default: ""
+
+      arch:
+        description: "Arquitectura(s) a compilar (separadas por coma). Dejar vacío = todas"
+        required: false
+        default: ""
+
+      channel:
+        description: "Canal a usar"
+        type: choice
+        required: true
+        default: stable
+        options:
+          - stable
+          - testing
 
 permissions:
   contents: write
@@ -16,6 +36,7 @@ env:
   CUSTOM_LICENSE_PUBLIC_KEY: F6835D26B20EA0D802192B242845F24B5CB095AEA3A175B6B34EF16CF3AF2B46
 
 jobs:
+
   Set_BuildTime:
     runs-on: ubuntu-22.04
     outputs:
@@ -25,20 +46,24 @@ jobs:
         id: set_buildtime
         run: echo "BUILD_TIME=$(date +'%s')" >> $GITHUB_OUTPUT
 
+
   Patch_RouterOS:
     needs: Set_BuildTime
     runs-on: ubuntu-22.04
+
     strategy:
       matrix:
-        arch: [x86,arm64,arm,mmips,mipsbe,smips,tile,ppc]
-        channel: [stable]
+        arch: ${{ fromJson( (github.event.inputs.arch != '' && '["' + replace(github.event.inputs.arch, ',', '","') + '"]') || '["x86","arm64","arm","mmips","mipsbe","smips","tile","ppc"]' ) }}
+        channel: [${{ github.event.inputs.channel || 'stable' }}]
 
     env:
       TZ: 'Asia/Jakarta'
+      REQUESTED_VERSION: ${{ github.event.inputs.version }}
       LATEST_VERSION: ""
       ARCH: ""
 
     steps:
+
     - name: Checkout repository
       uses: actions/checkout@v4
         
@@ -47,43 +72,42 @@ jobs:
       with:
         python-version: '3.11'
 
-    - name: Get latest routeros version
-      id: get_latest
+    - name: Determine version (requested or latest)
+      id: determine_version
       run: |
-        LATEST_VERSION=$(wget -nv -O - https://upgrade.mikrotik.com/routeros/NEWESTa7.${{ matrix.channel }} | cut -d ' ' -f1)
-        echo "Latest Version: $LATEST_VERSION"
-
-        if [ "${{ github.event_name }}" == "schedule" ]; then
-          _LATEST_VERSION=$(wget -nv -O - https://${{ env.CUSTOM_UPGRADE_URL }}/routeros/NEWESTa7.${{ matrix.channel }} | cut -d ' ' -f1)
-          if [ "$_LATEST_VERSION" == "$LATEST_VERSION" ]; then
-            echo "No new version found"
-            echo "has_new_version=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
+        if [ -z "${{ env.REQUESTED_VERSION }}" ]; then
+          echo "➤ No version specified → Fetching latest..."
+          LATEST=$(wget -nv -O - https://upgrade.mikrotik.com/routeros/NEWESTa7.${{ matrix.channel }} | cut -d ' ' -f1)
+          echo "LATEST_VERSION=$LATEST" >> $GITHUB_ENV
+          echo "Using latest version: $LATEST"
+        else
+          echo "LATEST_VERSION=${{ env.REQUESTED_VERSION }}" >> $GITHUB_ENV
+          echo "Using requested version: ${{ env.REQUESTED_VERSION }}"
         fi
 
-        echo "has_new_version=true" >> $GITHUB_OUTPUT
-        BUILD_TIME=${{ needs.Set_BuildTime.outputs.BUILD_TIME }}
+        # Convert architecture name to suffix
+        case "${{ matrix.arch }}" in
+          x86)    echo "ARCH=" >> $GITHUB_ENV ;;
+          arm64)  echo "ARCH=-arm64" >> $GITHUB_ENV ;;
+          arm)    echo "ARCH=-arm" >> $GITHUB_ENV ;;
+          mmips)  echo "ARCH=-mmips" >> $GITHUB_ENV ;;
+          mipsbe) echo "ARCH=-mipsbe" >> $GITHUB_ENV ;;
+          smips)  echo "ARCH=-smips" >> $GITHUB_ENV ;;
+          tile)   echo "ARCH=-tile" >> $GITHUB_ENV ;;
+          ppc)    echo "ARCH=-ppc" >> $GITHUB_ENV ;;
+        esac
 
-        echo "LATEST_VERSION=$LATEST_VERSION" >> $GITHUB_ENV
-        echo "BUILD_TIME=$BUILD_TIME" >> $GITHUB_ENV
+        echo "BUILD_TIME=${{ needs.Set_BuildTime.outputs.BUILD_TIME }}" >> $GITHUB_ENV
 
-        if [ "${{ matrix.arch }}" == "x86" ]; then ARCH=''
-        elif [ "${{ matrix.arch }}" == "arm64" ]; then ARCH='-arm64'
-        elif [ "${{ matrix.arch }}" == "arm" ]; then ARCH='-arm'
-        elif [ "${{ matrix.arch }}" == "mmips" ]; then ARCH='-mmips'
-        elif [ "${{ matrix.arch }}" == "mipsbe" ]; then ARCH='-mipsbe'
-        elif [ "${{ matrix.arch }}" == "smips" ]; then ARCH='-smips'
-        elif [ "${{ matrix.arch }}" == "tile" ]; then ARCH='-tile'
-        elif [ "${{ matrix.arch }}" == "ppc" ]; then ARCH='-ppc'
-        fi
-        echo "ARCH=$ARCH" >> $GITHUB_ENV
-
-        wget -nv -O CHANGELOG https://upgrade.mikrotik.com/routeros/$LATEST_VERSION/CHANGELOG
+    - name: Get CHANGELOG
+      run: |
+        wget -nv -O CHANGELOG https://upgrade.mikrotik.com/routeros/${{ env.LATEST_VERSION }}/CHANGELOG
         cat CHANGELOG
 
+    # ---------------------------
+    # CACHES
+    # ---------------------------
     - name: Cache Squashfs
-      if: steps.get_latest.outputs.has_new_version == 'true'
       id: cache-squashfs
       uses: actions/cache@v4
       with:
@@ -93,26 +117,29 @@ jobs:
         key: busybox-python3-squashfs-${{ matrix.arch }}
 
     - name: Cache NetInstall
-      if: steps.get_latest.outputs.has_new_version == 'true'
       id: cache-netinstall
       uses: actions/cache@v4
       with:
         path: netinstall.zip
         key: netinstall-${{ env.LATEST_VERSION }}
 
-    - name: Get netinstall
-      if: steps.get_latest.outputs.has_new_version == 'true' && steps.cache-netinstall.outputs.cache-hit != 'true'
-      run: sudo wget -nv -O netinstall.zip https://download.mikrotik.com/routeros/$LATEST_VERSION/netinstall-$LATEST_VERSION.zip
+    # ---------------------------
+    # NETINSTALL
+    # ---------------------------
+    - name: Download netinstall
+      if: steps.cache-netinstall.outputs.cache-hit != 'true'
+      run: sudo wget -nv -O netinstall.zip https://download.mikrotik.com/routeros/${{ env.LATEST_VERSION }}/netinstall-${{ env.LATEST_VERSION }}.zip
 
     - name: Patch netinstall
-      if: steps.get_latest.outputs.has_new_version == 'true'
       run: |
-        sudo unzip netinstall.zip
+        sudo unzip -o netinstall.zip
         sudo -E python3 patch.py netinstall netinstall.exe
-        sudo zip netinstall-$LATEST_VERSION.zip ./netinstall.exe
+        sudo zip netinstall-${{ env.LATEST_VERSION }}.zip netinstall.exe
 
-    - name: Cache mikrotik ISO/NPK
-      if: steps.get_latest.outputs.has_new_version == 'true'
+    # ---------------------------
+    # MIKROTIK FIRMWARE
+    # ---------------------------
+    - name: Cache firmware
       id: cache-mikrotik
       uses: actions/cache@v4
       with:
@@ -122,54 +149,51 @@ jobs:
           routeros.npk
         key: mikrotik-${{ env.LATEST_VERSION }}-${{ matrix.arch }}
 
-    - name: Get mikrotik firmware
-      if: steps.get_latest.outputs.has_new_version == 'true' && steps.cache-mikrotik.outputs.cache-hit != 'true'
+    - name: Download firmware
+      if: steps.cache-mikrotik.outputs.cache-hit != 'true'
       run: |
         if [ "${{ matrix.arch }}" == "x86" ] || [ "${{ matrix.arch }}" == "arm64" ]; then
-          sudo wget -nv -O mikrotik.iso https://download.mikrotik.com/routeros/$LATEST_VERSION/mikrotik-$LATEST_VERSION$ARCH.iso
+          sudo wget -nv -O mikrotik.iso https://download.mikrotik.com/routeros/${{ env.LATEST_VERSION }}/mikrotik-${{ env.LATEST_VERSION }}${{ env.ARCH }}.iso
         else
-          sudo wget -nv -O routeros.npk https://download.mikrotik.com/routeros/$LATEST_VERSION/routeros-$LATEST_VERSION$ARCH.npk
-          sudo wget -nv -O routeros.zip https://download.mikrotik.com/routeros/$LATEST_VERSION/all_packages$ARCH-$LATEST_VERSION.zip
+          sudo wget -nv -O routeros.npk https://download.mikrotik.com/routeros/${{ env.LATEST_VERSION }}/routeros-${{ env.LATEST_VERSION }}${{ env.ARCH }}.npk
+          sudo wget -nv -O routeros.zip https://download.mikrotik.com/routeros/${{ env.LATEST_VERSION }}/all_packages${{ env.ARCH }}-${{ env.LATEST_VERSION }}.zip
         fi
 
-    - name: Patch mikrotik firmware
-      if: steps.get_latest.outputs.has_new_version == 'true'
+    - name: Patch firmware
       run: |
         if [[ "${{ matrix.arch }}" =~ ^(arm|mmips|mipsbe|smips|tile|ppc)$ ]]; then
           sudo -E python3 patch.py npk routeros.npk
-          sudo -E python3 npk.py sign routeros.npk routeros-$LATEST_VERSION$ARCH.npk
+          sudo -E python3 npk.py sign routeros.npk routeros-${{ env.LATEST_VERSION }}${{ env.ARCH }}.npk
 
-          sudo unzip routeros.zip -d tmp
-          NPK_FILES=$(find ./tmp/*.npk)
-
-          for file in $NPK_FILES; do
-            sudo -E python3 patch.py npk $file
-            sudo -E python3 npk.py sign $file $file
-            sudo -E python3 npk.py verify $file
+          sudo unzip -o routeros.zip -d tmp
+          for file in tmp/*.npk; do
+            sudo -E python3 patch.py npk "$file"
+            sudo -E python3 npk.py sign "$file" "$file"
+            sudo -E python3 npk.py verify "$file"
           done
 
           cd tmp
-          sudo zip ../all_packages-${{ matrix.arch }}-$LATEST_VERSION.zip *.npk
+          sudo zip ../all_packages-${{ matrix.arch }}-${{ env.LATEST_VERSION }}.zip *.npk
           cd ..
 
         else
           sudo apt-get install -y mkisofs xorriso > /dev/null
+
           sudo mkdir iso
           sudo mount -o loop,ro mikrotik.iso iso
 
-          sudo mkdir new_iso
-          sudo cp -r iso/* new_iso/
-          sudo umount iso && sudo rm -rf iso
+          sudo cp -r iso new_iso
+          sudo umount iso
+          sudo rm -rf iso
 
-          sudo mv new_iso/routeros-$LATEST_VERSION$ARCH.npk ./
-          sudo -E python3 patch.py npk routeros-$LATEST_VERSION$ARCH.npk
+          sudo mv new_iso/routeros-${{ env.LATEST_VERSION }}${{ env.ARCH }}.npk ./ 
+          sudo -E python3 patch.py npk routeros-${{ env.LATEST_VERSION }}${{ env.ARCH }}.npk
 
-          NPK_FILES=$(find new_iso/*.npk)
-          for file in $NPK_FILES; do
-            sudo -E python3 npk.py sign $file $file
+          for file in new_iso/*.npk; do
+            sudo -E python3 npk.py sign "$file" "$file"
           done
 
-          sudo cp routeros-$LATEST_VERSION$ARCH.npk new_iso/
+          sudo cp routeros-${{ env.LATEST_VERSION }}${{ env.ARCH }}.npk new_iso/
 
           sudo mkdir efiboot
           sudo mount -o loop new_iso/efiboot.img efiboot
@@ -178,57 +202,52 @@ jobs:
             sudo -E python3 patch.py kernel efiboot/linux.x86_64
             sudo cp efiboot/linux.x86_64 BOOTX64.EFI
             sudo cp BOOTX64.EFI new_iso/isolinux/linux
-            sudo umount efiboot
+          else
+            sudo -E python3 patch.py kernel efiboot/EFI/BOOT/BOOTAA64.EFI
+          fi
 
-            sudo mkisofs -o mikrotik-$LATEST_VERSION$ARCH.iso \
-              -V "MikroTik $LATEST_VERSION x86" \
+          sudo umount efiboot
+          sudo rm -rf efiboot
+
+          if [ "${{ matrix.arch }}" == "x86" ]; then
+            sudo mkisofs -o mikrotik-${{ env.LATEST_VERSION }}${{ env.ARCH }}.iso \
+              -V "MikroTik ${{ env.LATEST_VERSION }} x86" \
               -b isolinux/isolinux.bin -c isolinux/boot.cat \
               -no-emul-boot -boot-load-size 4 -boot-info-table \
               -eltorito-alt-boot -e efiboot.img -no-emul-boot \
               -R -J new_iso
-
-          elif [ "${{ matrix.arch }}" == "arm64" ]; then
-            sudo -E python3 patch.py kernel efiboot/EFI/BOOT/BOOTAA64.EFI
-            sudo umount efiboot
-
-            sudo xorriso -as mkisofs -o mikrotik-$LATEST_VERSION$ARCH.iso \
-              -V "MikroTik $LATEST_VERSION arm64" \
+          else
+            sudo xorriso -as mkisofs -o mikrotik-${{ env.LATEST_VERSION }}${{ env.ARCH }}.iso \
+              -V "MikroTik ${{ env.LATEST_VERSION }} arm64" \
               -b efiboot.img -no-emul-boot -R -J new_iso
           fi
 
-          sudo rm -rf efiboot
           mkdir all_packages
           cp new_iso/*.npk all_packages/
-
-          sudo rm -rf new_iso
           cd all_packages
-          zip ../all_packages-${{ matrix.arch }}-$LATEST_VERSION.zip *.npk
+          zip ../all_packages-${{ matrix.arch }}-${{ env.LATEST_VERSION }}.zip *.npk
           cd ..
         fi
 
-    - name: Clear Cloudflare cache
-      if: steps.get_latest.outputs.has_new_version == 'true'
-      run: |
-        curl --request POST \
-          --url "https://api.cloudflare.com/client/v4/zones/fe6831ed6dc9e6235e69ef2a31f2e7fe/purge_cache" \
-          --header "Authorization: Bearer 9GDQkzU51QXaqzp1qMjyFKpyeJyOdnNoG9GZQaGP" \
-          --header "Content-Type:application/json" \
-          --data '{"purge_everything": true}'
+    # ---------------------------
+    # RELEASE
+    # ---------------------------
 
-    - name: Delete Release tag
-      if: steps.get_latest.outputs.has_new_version == 'true'
+    - name: Delete existing release/tag
       run: |
         HEADER="Authorization: token ${{ secrets.GITHUB_TOKEN }}"
-        RELEASE_INFO=$(curl -s -H "$HEADER" https://api.github.com/repos/${{ github.repository }}/releases/tags/$LATEST_VERSION$ARCH)
+        TAG="${{ env.LATEST_VERSION }}${{ env.ARCH }}"
+
+        RELEASE_INFO=$(curl -s -H "$HEADER" https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG)
         RELEASE_ID=$(echo $RELEASE_INFO | jq -r '.id')
 
         if [ "$RELEASE_ID" != "null" ]; then
-          curl -X DELETE -H "$HEADER" https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$LATEST_VERSION$ARCH
+          echo "Deleting previous release $TAG"
+          curl -X DELETE -H "$HEADER" https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$TAG
           curl -X DELETE -H "$HEADER" https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID
         fi
 
     - name: Create Release
-      if: steps.get_latest.outputs.has_new_version == 'true'
       uses: softprops/action-gh-release@v2
       with:
         name: "RouterOS ${{ env.LATEST_VERSION }} ${{ matrix.arch }}"
@@ -238,7 +257,6 @@ jobs:
         files: |
           mikrotik-${{ env.LATEST_VERSION }}${{ env.ARCH }}.iso
           netinstall-${{ env.LATEST_VERSION }}.zip
-          install-image-${{ env.LATEST_VERSION }}.zip
           routeros-${{ env.LATEST_VERSION }}${{ env.ARCH }}.npk
           all_packages-*-${{ env.LATEST_VERSION }}.zip
           *.EFI
