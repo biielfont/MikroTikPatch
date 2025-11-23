@@ -98,6 +98,11 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install Python dependencies
+        run: |
+          pip install pefile lief
+
+
       - name: Determine version (requested or latest)
         id: determine_version
         run: |
